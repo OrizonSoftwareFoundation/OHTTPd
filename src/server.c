@@ -114,12 +114,14 @@ static const char *status_text(int code)
 {
     switch (code) {
         case 200: return "OK";
+        case 206: return "Partial Content";
         case 301: return "Moved Permanently";
         case 400: return "Bad Request";
         case 403: return "Forbidden";
         case 404: return "Not Found";
         case 405: return "Method Not Allowed";
         case 413: return "Request Entity Too Large";
+        case 416: return "Range Not Satisfiable";
         case 500: return "Internal Server Error";
         case 501: return "Not Implemented";
         default:  return "Unknown";
@@ -134,6 +136,7 @@ static int send_response(int fd, int code, const char *content_type,
         "HTTP/1.1 %d %s\r\n"
         "Content-Type: %s\r\n"
         "Content-Length: %zu\r\n"
+        "Accept-Ranges: bytes\r\n"
         "Connection: close\r\n"
         "Server: OHTTPd/1.0\r\n"
         "\r\n",
@@ -244,8 +247,43 @@ static int is_path_safe(const char *path)
     return 1;
 }
 
+/* Parse Range header.  Returns 1 if valid, sets *start and *end.
+   *end may be -1 meaning "to end of file".  When file_size is 0
+   the caller just wants the raw values without validation. */
+static int parse_range(const char *hdr, off_t file_size,
+                       off_t *start, off_t *end)
+{
+    if (strncmp(hdr, "bytes=", 6) != 0) return 0;
+    hdr += 6;
+
+    char *dash = strchr(hdr, '-');
+    if (!dash) return 0;
+
+    if (dash == hdr) {
+        long suffix = atol(hdr + 1);
+        if (suffix <= 0) return 0;
+        if (file_size == 0) { *start = *end = -1; return 1; }
+        *start = (file_size > suffix) ? file_size - suffix : 0;
+        *end = file_size - 1;
+        return 1;
+    }
+
+    *start = atol(hdr);
+    if (*start < 0 || (file_size > 0 && *start >= file_size)) return 0;
+
+    if (*(dash + 1) == 0) {
+        if (file_size > 0) *end = file_size - 1;
+        else *end = -1;
+    } else {
+        *end = atol(dash + 1);
+        if (*end < *start || (file_size > 0 && *end >= file_size)) return 0;
+    }
+
+    return 1;
+}
+
 static int serve_file(int fd, const char *path, const char *root_dir,
-                      off_t *out_size)
+                      off_t *out_size, off_t range_start, off_t range_end)
 {
     char full[8192];
     int n = snprintf(full, sizeof(full), "%s%s", root_dir, path);
@@ -301,17 +339,73 @@ static int serve_file(int fd, const char *path, const char *root_dir,
     }
 
     off_t file_size = st.st_size;
+    int is_range = (range_start >= 0);
+
+    if (is_range && (range_start >= file_size || range_end >= file_size)) {
+        close(file_fd);
+        char body[256];
+        int n = snprintf(body, sizeof(body),
+            "<!DOCTYPE html><html><head><meta charset=\"utf-8\">"
+            "<title>416 Range Not Satisfiable</title></head><body>"
+            "<h1>416 Range Not Satisfiable</h1>"
+            "<p>Range 0-%lld</p></body></html>",
+            (long long)(file_size - 1));
+
+        char header[512];
+        snprintf(header, sizeof(header),
+            "HTTP/1.1 416 Range Not Satisfiable\r\n"
+            "Content-Type: text/html; charset=utf-8\r\n"
+            "Content-Length: %d\r\n"
+            "Content-Range: bytes */%lld\r\n"
+            "Accept-Ranges: bytes\r\n"
+            "Connection: close\r\n"
+            "Server: OHTTPd/1.0\r\n"
+            "\r\n",
+            n, (long long)file_size);
+        ssize_t r1 = write(fd, header, strlen(header));
+        ssize_t r2 = write(fd, body, (size_t)n);
+        (void)r1; (void)r2;
+        return 416;
+    }
+
+    off_t send_start = is_range ? range_start : 0;
+    off_t send_end   = is_range ? range_end : file_size - 1;
+    off_t send_len   = send_end - send_start + 1;
+
     const char *ct = mime_type(full);
 
+    if (lseek(file_fd, send_start, SEEK_SET) < 0) {
+        close(file_fd);
+        send_error(fd, 500, "Seek failed");
+        return 500;
+    }
+
     char header[1024];
-    int hlen = snprintf(header, sizeof(header),
-        "HTTP/1.1 200 OK\r\n"
-        "Content-Type: %s\r\n"
-        "Content-Length: %lld\r\n"
-        "Connection: close\r\n"
-        "Server: OHTTPd/1.0\r\n"
-        "\r\n",
-        ct, (long long)file_size);
+    int hlen;
+    if (is_range) {
+        hlen = snprintf(header, sizeof(header),
+            "HTTP/1.1 206 Partial Content\r\n"
+            "Content-Type: %s\r\n"
+            "Content-Length: %lld\r\n"
+            "Content-Range: bytes %lld-%lld/%lld\r\n"
+            "Accept-Ranges: bytes\r\n"
+            "Connection: close\r\n"
+            "Server: OHTTPd/1.0\r\n"
+            "\r\n",
+            ct, (long long)send_len,
+            (long long)send_start, (long long)send_end,
+            (long long)file_size);
+    } else {
+        hlen = snprintf(header, sizeof(header),
+            "HTTP/1.1 200 OK\r\n"
+            "Content-Type: %s\r\n"
+            "Content-Length: %lld\r\n"
+            "Accept-Ranges: bytes\r\n"
+            "Connection: close\r\n"
+            "Server: OHTTPd/1.0\r\n"
+            "\r\n",
+            ct, (long long)file_size);
+    }
 
     if (hlen < 0) { close(file_fd); send_error(fd, 500, "Header build failed"); return 500; }
 
@@ -320,20 +414,24 @@ static int serve_file(int fd, const char *path, const char *root_dir,
         return -1;
     }
 
+    off_t remaining = send_len;
     char buf[BUFFER_SIZE];
-    ssize_t bytes_read;
-    while ((bytes_read = read(file_fd, buf, sizeof(buf))) > 0) {
+    while (remaining > 0) {
+        size_t chunk = (remaining > (off_t)sizeof(buf)) ? sizeof(buf) : (size_t)remaining;
+        ssize_t bytes_read = read(file_fd, buf, chunk);
+        if (bytes_read <= 0) break;
         ssize_t written = 0;
         while (written < bytes_read) {
             ssize_t w = write(fd, buf + written, (size_t)(bytes_read - written));
             if (w < 0) { close(file_fd); return -1; }
             written += w;
         }
+        remaining -= bytes_read;
     }
 
     close(file_fd);
-    if (out_size) *out_size = file_size;
-    return 200;
+    if (out_size) *out_size = send_len;
+    return is_range ? 206 : 200;
 }
 
 static void handle_client(int fd, const char *root_dir, const char *ip_str)
@@ -397,8 +495,26 @@ static void handle_client(int fd, const char *root_dir, const char *ip_str)
         return;
     }
 
+    off_t range_start = -1;
+    off_t range_end = -1;
+    const char *range_hdr = strstr(buf, "Range: ");
+    if (range_hdr) {
+        const char *eol = strchr(range_hdr, '\r');
+        if (!eol) eol = strchr(range_hdr, '\n');
+        if (eol) {
+            char range_buf[256];
+            size_t rlen = (size_t)(eol - range_hdr - 7);
+            if (rlen < sizeof(range_buf)) {
+                memcpy(range_buf, range_hdr + 7, rlen);
+                range_buf[rlen] = 0;
+                if (!parse_range(range_buf, 0, &range_start, &range_end))
+                    range_start = -1;
+            }
+        }
+    }
+
     off_t size = 0;
-    int status = serve_file(fd, decoded, root_dir, &size);
+    int status = serve_file(fd, decoded, root_dir, &size, range_start, range_end);
     log_request(ip_str, method, decoded, status, size);
     free(decoded);
     close(fd);
