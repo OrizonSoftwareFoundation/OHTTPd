@@ -19,7 +19,8 @@ A lightweight, single-binary HTTP/1.1 static file server written in C, licensed 
 - Null byte and path traversal rejection
 - Per-IP rate limiting (default 10 req/s, configurable)
 - Global connection limit (default 256 concurrent)
-- Single ~450-line C99 codebase, no external dependencies beyond libc and pthreads
+- Per-request logging to stderr (IP, method, path, status, size)
+- Single ~500-line C99 codebase, no external dependencies beyond libc and pthreads
 
 ## Building
 
