@@ -309,19 +309,12 @@ static int serve_file(int fd, const char *path, const char *root_dir,
         send_error(fd, code, code == 403 ? "Access denied" : "File not found");
         return code;
     }
-    if (strncmp(resolved, root_dir, strlen(root_dir)) != 0) {
-        free(resolved);
+    int safe = (strncmp(resolved, root_dir, strlen(root_dir)) == 0);
+    free(resolved);
+    if (!safe) {
         send_error(fd, 403, "Access denied");
         return 403;
     }
-    size_t rlen = strlen(resolved);
-    if (rlen >= sizeof(full)) {
-        free(resolved);
-        send_error(fd, 500, "Path too long");
-        return 500;
-    }
-    memcpy(full, resolved, rlen + 1);
-    free(resolved);
 
     struct stat st;
     if (stat(full, &st) < 0) {
@@ -351,25 +344,18 @@ static int serve_file(int fd, const char *path, const char *root_dir,
         }
 
         if (stat(index_path, &st) == 0 && S_ISREG(st.st_mode)) {
-            memcpy(full, index_path, sizeof(full));
-            char *res2 = realpath(full, NULL);
+            char *res2 = realpath(index_path, NULL);
             if (!res2) {
                 send_error(fd, 403, "Access denied");
                 return 403;
             }
-            if (strncmp(res2, root_dir, strlen(root_dir)) != 0) {
-                free(res2);
+            int safe2 = (strncmp(res2, root_dir, strlen(root_dir)) == 0);
+            free(res2);
+            if (!safe2) {
                 send_error(fd, 403, "Access denied");
                 return 403;
             }
-            size_t rl2 = strlen(res2);
-            if (rl2 >= sizeof(full)) {
-                free(res2);
-                send_error(fd, 500, "Path too long");
-                return 500;
-            }
-            memcpy(full, res2, rl2 + 1);
-            free(res2);
+            memcpy(full, index_path, sizeof(full));
         } else {
             send_error(fd, 403, "Directory listing not available");
             return 403;
