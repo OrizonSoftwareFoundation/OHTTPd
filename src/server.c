@@ -6,13 +6,16 @@
 #include <arpa/inet.h>
 #include <errno.h>
 #include <fcntl.h>
+#include <grp.h>
 #include <pthread.h>
+#include <pwd.h>
 #include <signal.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 #include <sys/socket.h>
 #include <sys/stat.h>
+#include <sys/time.h>
 #include <unistd.h>
 
 #define BUFFER_SIZE 8192
@@ -115,6 +118,40 @@ static char *url_decode(const char *src)
     return dst;
 }
 
+static int drop_privileges(const char *user)
+{
+    if (!user) return 0;
+
+    struct passwd pw;
+    struct passwd *result;
+    char pwbuf[4096];
+
+    int r = getpwnam_r(user, &pw, pwbuf, sizeof(pwbuf), &result);
+    if (r != 0 || !result) {
+        fprintf(stderr, "error: cannot find user '%s'\n", user);
+        return -1;
+    }
+
+    if (initgroups(user, pw.pw_gid) < 0) {
+        perror("initgroups");
+        return -1;
+    }
+
+    if (setgid(pw.pw_gid) < 0) {
+        perror("setgid");
+        return -1;
+    }
+
+    if (setuid(pw.pw_uid) < 0) {
+        perror("setuid");
+        return -1;
+    }
+
+    printf("Privileges dropped to user '%s' (uid=%d gid=%d)\n", user,
+           pw.pw_uid, pw.pw_gid);
+    return 0;
+}
+
 static int is_path_safe(const char *path)
 {
     if (strstr(path, "..")) return 0;
@@ -214,6 +251,12 @@ static void handle_client(int fd, const char *root_dir)
     }
 
     buf[received] = 0;
+
+    if (memchr(buf, 0, (size_t)received) != NULL) {
+        send_error(fd, 400, "Null byte in request");
+        close(fd);
+        return;
+    }
 
     char method[16], path[4096], version[16];
     int parsed = sscanf(buf, "%15s %4095s %15s", method, path, version);
@@ -330,6 +373,11 @@ int server_start(server_config *config)
     int server_fd = create_server_socket(config->port, config->backlog);
     if (server_fd < 0) return 1;
 
+    if (drop_privileges(config->run_user) < 0) {
+        close(server_fd);
+        return 1;
+    }
+
     printf("OHTTPd/1.0 — listening on http://0.0.0.0:%d/\n", config->port);
     printf("Root directory: %s\n", config->root_dir);
     printf("Max threads: %d\n", config->max_threads);
@@ -345,6 +393,11 @@ int server_start(server_config *config)
             perror("accept");
             continue;
         }
+
+        struct timeval tv;
+        tv.tv_sec = 5;
+        tv.tv_usec = 0;
+        setsockopt(client_fd, SOL_SOCKET, SO_RCVTIMEO, &tv, sizeof(tv));
 
         client_job *job = malloc(sizeof(client_job));
         if (!job) {

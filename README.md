@@ -13,7 +13,11 @@ A lightweight, single-binary HTTP/1.1 static file server written in C, licensed 
 - MIME type detection for 30+ file extensions
 - Clean HTML error pages (400, 403, 404, 405, 413, 500, 501)
 - Graceful shutdown on SIGINT/SIGTERM
-- Single ~300-line C99 codebase, no external dependencies beyond libc and pthreads
+- PIE + stack-protector + FORTIFY compile-time hardening
+- Privilege drop after bind (`-u nobody`)
+- 5-second socket receive timeout (slow-loris mitigation)
+- Null byte and path traversal rejection
+- Single ~400-line C99 codebase, no external dependencies beyond libc and pthreads
 
 ## Building
 
@@ -40,6 +44,7 @@ Options:
   -r, --root <dir>       Root directory for serving files (default: ./public)
   -b, --backlog <num>    Connection backlog (default: 16)
   -t, --threads <num>    Max worker threads (default: 4)
+  -u, --user <name>      Drop privileges to this user after bind
   -h, --help             Show this help and exit
 ```
 
@@ -57,6 +62,9 @@ make
 
 # Run with more worker threads
 ./ohttpd -p 80 -t 8
+
+# Run on port 80 and drop privileges to nobody
+sudo ./ohttpd -p 80 -u nobody -r /var/www/html
 ```
 
 Then open `http://localhost:8080/` in your browser.
