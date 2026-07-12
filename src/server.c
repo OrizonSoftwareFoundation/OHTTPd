@@ -107,6 +107,7 @@ static void sigint_handler(int sig)
 typedef struct {
     int fd;
     char *root_dir;
+    char ip_str[INET6_ADDRSTRLEN];
 } client_job;
 
 static const char *status_text(int code)
@@ -227,6 +228,14 @@ static int drop_privileges(const char *user)
     return 0;
 }
 
+static void log_request(const char *ip, const char *method,
+                        const char *path, int status, off_t size)
+{
+    fprintf(stderr, "[%s] %s %s -> %d (%lld bytes)\n",
+            ip ? ip : "unknown", method ? method : "?", path ? path : "?",
+            status, (long long)size);
+}
+
 static int is_path_safe(const char *path)
 {
     if (strstr(path, "..")) return 0;
@@ -235,16 +244,21 @@ static int is_path_safe(const char *path)
     return 1;
 }
 
-static int serve_file(int fd, const char *path, const char *root_dir)
+static int serve_file(int fd, const char *path, const char *root_dir,
+                      off_t *out_size)
 {
     char full[8192];
     int n = snprintf(full, sizeof(full), "%s%s", root_dir, path);
-    if (n < 0 || (size_t)n >= sizeof(full)) return send_error(fd, 500, "Path too long");
+    if (n < 0 || (size_t)n >= sizeof(full)) {
+        send_error(fd, 500, "Path too long");
+        return 500;
+    }
 
     struct stat st;
     if (stat(full, &st) < 0) {
-        if (errno == EACCES) return send_error(fd, 403, "Access denied");
-        return send_error(fd, 404, "File not found");
+        int code = (errno == EACCES) ? 403 : 404;
+        send_error(fd, code, code == 403 ? "Access denied" : "File not found");
+        return code;
     }
 
     if (S_ISDIR(st.st_mode)) {
@@ -255,29 +269,35 @@ static int serve_file(int fd, const char *path, const char *root_dir)
                 "<!DOCTYPE html><html><head><meta charset=\"utf-8\">"
                 "<meta http-equiv=\"refresh\" content=\"0;url=%s/\">"
                 "</head><body></body></html>", path);
-            return send_response(fd, 301, "text/html; charset=utf-8",
-                                 redirect, strlen(redirect));
+            send_response(fd, 301, "text/html; charset=utf-8",
+                          redirect, strlen(redirect));
+            return 301;
         }
 
         char index_path[8192];
         int idx_n = snprintf(index_path, sizeof(index_path), "%sindex.html", full);
-        if (idx_n < 0 || (size_t)idx_n >= sizeof(index_path))
-            return send_error(fd, 500, "Path too long");
+        if (idx_n < 0 || (size_t)idx_n >= sizeof(index_path)) {
+            send_error(fd, 500, "Path too long");
+            return 500;
+        }
 
         if (stat(index_path, &st) == 0 && S_ISREG(st.st_mode)) {
             memcpy(full, index_path, sizeof(full));
         } else {
-            return send_error(fd, 403, "Directory listing not available");
+            send_error(fd, 403, "Directory listing not available");
+            return 403;
         }
     }
 
     if (!S_ISREG(st.st_mode)) {
-        return send_error(fd, 403, "Not a regular file");
+        send_error(fd, 403, "Not a regular file");
+        return 403;
     }
 
     int file_fd = open(full, O_RDONLY);
     if (file_fd < 0) {
-        return send_error(fd, 403, "Access denied");
+        send_error(fd, 403, "Access denied");
+        return 403;
     }
 
     off_t file_size = st.st_size;
@@ -293,7 +313,7 @@ static int serve_file(int fd, const char *path, const char *root_dir)
         "\r\n",
         ct, (long long)file_size);
 
-    if (hlen < 0) { close(file_fd); return send_error(fd, 500, "Header build failed"); }
+    if (hlen < 0) { close(file_fd); send_error(fd, 500, "Header build failed"); return 500; }
 
     if (write(fd, header, (size_t)hlen) < 0) {
         close(file_fd);
@@ -312,10 +332,11 @@ static int serve_file(int fd, const char *path, const char *root_dir)
     }
 
     close(file_fd);
-    return 0;
+    if (out_size) *out_size = file_size;
+    return 200;
 }
 
-static void handle_client(int fd, const char *root_dir)
+static void handle_client(int fd, const char *root_dir, const char *ip_str)
 {
     char buf[REQUEST_MAX];
     ssize_t received = read(fd, buf, sizeof(buf) - 1);
@@ -329,6 +350,7 @@ static void handle_client(int fd, const char *root_dir)
 
     if (memchr(buf, 0, (size_t)received) != NULL) {
         send_error(fd, 400, "Null byte in request");
+        log_request(ip_str, NULL, NULL, 400, 0);
         close(fd);
         return;
     }
@@ -338,12 +360,14 @@ static void handle_client(int fd, const char *root_dir)
 
     if (parsed < 2) {
         send_error(fd, 400, "Malformed request");
+        log_request(ip_str, NULL, NULL, 400, 0);
         close(fd);
         return;
     }
 
     if (strcmp(method, "GET") != 0 && strcmp(method, "HEAD") != 0) {
         send_error(fd, 405, "Only GET and HEAD are supported");
+        log_request(ip_str, method, path, 405, 0);
         close(fd);
         return;
     }
@@ -351,6 +375,7 @@ static void handle_client(int fd, const char *root_dir)
     if (parsed == 3) {
         if (strncmp(version, "HTTP/", 5) != 0) {
             send_error(fd, 400, "Invalid HTTP version");
+            log_request(ip_str, method, path, 400, 0);
             close(fd);
             return;
         }
@@ -359,18 +384,22 @@ static void handle_client(int fd, const char *root_dir)
     char *decoded = url_decode(path);
     if (!decoded) {
         send_error(fd, 500, "URL decode failed");
+        log_request(ip_str, method, path, 500, 0);
         close(fd);
         return;
     }
 
     if (!is_path_safe(decoded)) {
         send_error(fd, 403, "Path traversal detected");
+        log_request(ip_str, method, decoded, 403, 0);
         free(decoded);
         close(fd);
         return;
     }
 
-    serve_file(fd, decoded, root_dir);
+    off_t size = 0;
+    int status = serve_file(fd, decoded, root_dir, &size);
+    log_request(ip_str, method, decoded, status, size);
     free(decoded);
     close(fd);
 }
@@ -378,7 +407,7 @@ static void handle_client(int fd, const char *root_dir)
 static void *worker_thread(void *arg)
 {
     client_job *job = (client_job *)arg;
-    handle_client(job->fd, job->root_dir);
+    handle_client(job->fd, job->root_dir, job->ip_str);
     conn_dec();
     free(job);
     return NULL;
@@ -481,6 +510,12 @@ int server_start(server_config *config)
 
         uint32_t ip = ip4_from_addr(&client_addr);
         if (!rate_check(ip, config->rate_limit)) {
+            char drop_ip[INET6_ADDRSTRLEN] = "";
+            if (client_addr.ss_family == AF_INET)
+                inet_ntop(AF_INET, &((struct sockaddr_in *)&client_addr)->sin_addr, drop_ip, sizeof(drop_ip));
+            else if (client_addr.ss_family == AF_INET6)
+                inet_ntop(AF_INET6, &((struct sockaddr_in6 *)&client_addr)->sin6_addr, drop_ip, sizeof(drop_ip));
+            fprintf(stderr, "[%s] rate-limited\n", drop_ip);
             close(client_fd);
             continue;
         }
@@ -501,11 +536,20 @@ int server_start(server_config *config)
 
         job->fd = client_fd;
         job->root_dir = config->root_dir;
+        job->ip_str[0] = 0;
+
+        if (client_addr.ss_family == AF_INET) {
+            struct sockaddr_in *sin = (struct sockaddr_in *)&client_addr;
+            inet_ntop(AF_INET, &sin->sin_addr, job->ip_str, sizeof(job->ip_str));
+        } else if (client_addr.ss_family == AF_INET6) {
+            struct sockaddr_in6 *sin6 = (struct sockaddr_in6 *)&client_addr;
+            inet_ntop(AF_INET6, &sin6->sin6_addr, job->ip_str, sizeof(job->ip_str));
+        }
 
         pthread_t thread;
         if (pthread_create(&thread, NULL, worker_thread, job) != 0) {
             perror("pthread_create");
-            handle_client(client_fd, config->root_dir);
+            handle_client(client_fd, config->root_dir, job->ip_str);
             conn_dec();
             free(job);
         } else {
