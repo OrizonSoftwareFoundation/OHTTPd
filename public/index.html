@@ -1,0 +1,68 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>OHTTPd — Example Site</title>
+    <link rel="stylesheet" href="/style.css">
+</head>
+<body>
+    <header>
+        <h1>OHTTPd</h1>
+        <p class="subtitle">HTTP/1.1 static file server</p>
+    </header>
+
+    <main>
+        <section>
+            <h2>What the server does</h2>
+            <p>OHTTPd serves static files from a root directory over HTTP.
+               Point it at a folder and it will serve HTML, CSS, JavaScript,
+               images, fonts, JSON, and anything else you put there.
+               No configuration files, no scripting — just files on disk.</p>
+        </section>
+
+        <section>
+            <h2>Files being served from this directory</h2>
+            <table>
+                <thead>
+                    <tr><th>File</th><th>Type</th><th>Link</th></tr>
+                </thead>
+                <tbody>
+                    <tr><td><code>/index.html</code></td><td>HTML</td><td><a href="/">view</a></td></tr>
+                    <tr><td><code>/style.css</code></td><td>CSS</td><td><a href="/style.css">view</a></td></tr>
+                    <tr><td><code>/script.js</code></td><td>JavaScript</td><td><a href="/script.js">view</a></td></tr>
+                    <tr><td><code>/data.json</code></td><td>JSON</td><td><a href="/data.json">view</a></td></tr>
+                    <tr><td><code>/readme.txt</code></td><td>Plain text</td><td><a href="/readme.txt">view</a></td></tr>
+                </tbody>
+            </table>
+        </section>
+
+        <section>
+            <h2>Response codes</h2>
+            <p>Try these URLs to see how different HTTP status codes look:</p>
+            <ul>
+                <li><a href="/nonexistent">404 Not Found</a></li>
+                <li><a href="/../etc/passwd">403 Forbidden</a> (path traversal attempt)</li>
+            </ul>
+        </section>
+
+        <section>
+            <h2>How it works</h2>
+            <p>Send a request to the server's address.  The server maps the URL path
+               to a file in its root directory and sends it back with the correct
+               <code>Content-Type</code> header.  Directories are automatically resolved
+               to their <code>index.html</code> file, if one exists.</p>
+            <pre><code>$ curl -I http://localhost:8080/style.css
+HTTP/1.1 200 OK
+Content-Type: text/css; charset=utf-8
+Content-Length: 148
+Connection: close
+Server: OHTTPd/1.0</code></pre>
+        </section>
+    </main>
+
+    <footer>
+        <p>Licensed under the <a href="https://eupl.eu">EUPL v1.2</a></p>
+    </footer>
+</body>
+</html>

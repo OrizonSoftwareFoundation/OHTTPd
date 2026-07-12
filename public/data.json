@@ -1,0 +1,7 @@
+{
+    "server": "OHTTPd",
+    "version": "1.0",
+    "protocol": "HTTP/1.1",
+    "status": "running",
+    "files": ["index.html", "style.css", "script.js", "data.json", "readme.txt"]
+}
