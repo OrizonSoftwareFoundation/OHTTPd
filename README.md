@@ -1,6 +1,6 @@
 # OHTTPd
 
-A lightweight, single-binary HTTP/1.1 static file server written in C, licensed under the EUPL v1.2.
+A lightweight, single-binary HTTP static file server written in C, licensed under the EUPL v1.2.
 
 ## Features
 
@@ -24,18 +24,8 @@ A lightweight, single-binary HTTP/1.1 static file server written in C, licensed 
 
 ## Building
 
-Requires a C99 compiler (GCC, Clang) and POSIX threads.
-
-```sh
-make          # builds the `ohttpd` binary
-make clean    # removes object files and the binary
-```
-
-Override the compiler or flags:
-
-```sh
-make CC=clang CFLAGS="-Wall -Wextra -O2 -std=c99"
-```
+Requires a GCC or Clang 
+Make/Make clean is implemented
 
 ## Usage
 
@@ -71,12 +61,5 @@ make
 # Run on port 80 and drop privileges to nobody
 sudo ./ohttpd -p 80 -u nobody -r /var/www/html
 
-# Disable rate limiting and connection limits
-./ohttpd -l 0 -c 0
-```
-
-Then open `http://localhost:8080/` in your browser.
-
-## License
 
 European Union Public Licence v. 1.2 - see [LICENSE](LICENSE).
