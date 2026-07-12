@@ -1,6 +1,6 @@
 # OHTTPd
 
-A lightweight, single-binary HTTP/1.1 static file server written in C, licensed under the EUPL v1.2.
+A lightweight, single-binary HTTP static file server written in C, licensed under the EUPL v1.2.
 
 ## Features
 
