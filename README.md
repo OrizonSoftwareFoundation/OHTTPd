@@ -96,4 +96,4 @@ OHTTPd/
 
 ## License
 
-European Union Public Licence v. 1.2 — see [LICENSE](LICENSE).
+European Union Public Licence v. 1.2 - see [LICENSE](LICENSE).
