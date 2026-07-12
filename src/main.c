@@ -16,6 +16,9 @@ static void print_usage(const char *prog)
         "                         (default: ./public)\n"
         "  -b, --backlog <num>    Connection backlog (default: 16)\n"
         "  -t, --threads <num>    Max worker threads (default: 4)\n"
+        "  -u, --user <name>      Drop privileges to this user after bind\n"
+        "  -c, --connlimit <num>  Max concurrent connections (default: 256, 0=unlim)\n"
+        "  -l, --ratelimit <num>  Max connections/min per IP (default: 100, 0=unlim)\n"
         "  -h, --help             Show this help and exit\n",
         prog);
 }
@@ -27,6 +30,9 @@ int main(int argc, char *argv[])
     config.root_dir = "./public";
     config.backlog = 16;
     config.max_threads = 4;
+    config.run_user = NULL;
+    config.max_connections = 256;
+    config.rate_limit = 600;
 
     for (int i = 1; i < argc; i++) {
         if (strcmp(argv[i], "-h") == 0 || strcmp(argv[i], "--help") == 0) {
@@ -66,6 +72,32 @@ int main(int argc, char *argv[])
             config.max_threads = atoi(argv[++i]);
             if (config.max_threads <= 0) {
                 fprintf(stderr, "error: threads must be positive\n");
+                return 1;
+            }
+        } else if (strcmp(argv[i], "-u") == 0 || strcmp(argv[i], "--user") == 0) {
+            if (i + 1 >= argc) {
+                fprintf(stderr, "error: --user requires an argument\n");
+                return 1;
+            }
+            config.run_user = argv[++i];
+        } else if (strcmp(argv[i], "-c") == 0 || strcmp(argv[i], "--connlimit") == 0) {
+            if (i + 1 >= argc) {
+                fprintf(stderr, "error: --connlimit requires an argument\n");
+                return 1;
+            }
+            config.max_connections = atoi(argv[++i]);
+            if (config.max_connections < 0) {
+                fprintf(stderr, "error: connlimit must be >= 0\n");
+                return 1;
+            }
+        } else if (strcmp(argv[i], "-l") == 0 || strcmp(argv[i], "--ratelimit") == 0) {
+            if (i + 1 >= argc) {
+                fprintf(stderr, "error: --ratelimit requires an argument\n");
+                return 1;
+            }
+            config.rate_limit = atoi(argv[++i]);
+            if (config.rate_limit < 0) {
+                fprintf(stderr, "error: ratelimit must be >= 0\n");
                 return 1;
             }
         } else {
