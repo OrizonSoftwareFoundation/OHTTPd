@@ -61,9 +61,5 @@ make
 # Run on port 80 and drop privileges to nobody
 sudo ./ohttpd -p 80 -u nobody -r /var/www/html
 
-# Disable rate limiting and connection limits
-./ohttpd -l 0 -c 0
-```
-## License
 
-European Union Public Licence v. 1.2 — see [LICENSE](LICENSE).
+European Union Public Licence v. 1.2 - see [LICENSE](LICENSE).
