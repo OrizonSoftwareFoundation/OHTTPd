@@ -1,7 +1,7 @@
+#define _POSIX_C_SOURCE 200809L
+
 #include "server.h"
 #include "mime.h"
-
-#define _POSIX_C_SOURCE 200809L
 
 #include <stdatomic.h>
 #include <stdint.h>
@@ -21,12 +21,16 @@
 #include <sys/time.h>
 #include <unistd.h>
 
+#include <semaphore.h>
+
 #define BUFFER_SIZE 8192
 #define REQUEST_MAX 4096
 #define RATE_TABLE_SIZE 256
 #define RATE_WINDOW 60
 
 static volatile int running = 1;
+static sem_t thread_sem;
+static int thread_limit_enabled = 0;
 
 /* --- rate limiter --- */
 
@@ -47,8 +51,14 @@ static uint32_t ip4_from_addr(const struct sockaddr_storage *addr)
     }
     if (addr->ss_family == AF_INET6) {
         const struct sockaddr_in6 *sin6 = (const struct sockaddr_in6 *)addr;
-        if (IN6_IS_ADDR_V4MAPPED(&sin6->sin6_addr))
-            return (uint32_t)(ntohl(sin6->sin6_addr.__in6_u.__u6_addr32[3]));
+        if (IN6_IS_ADDR_V4MAPPED(&sin6->sin6_addr)) {
+            uint32_t v4;
+            memcpy(&v4, sin6->sin6_addr.s6_addr + 12, 4);
+            return (uint32_t)ntohl(v4);
+        }
+        uint32_t parts[4];
+        memcpy(parts, sin6->sin6_addr.s6_addr, 16);
+        return parts[0] ^ parts[1] ^ parts[2] ^ parts[3];
     }
     return 0;
 }
@@ -182,6 +192,7 @@ static char *url_decode(const char *src)
             char *end;
             long val = strtol(hex, &end, 16);
             if (*end == 0) {
+                if (val == 0) { free(dst); return NULL; }
                 dst[j++] = (char)val;
                 i += 2;
             } else {
@@ -292,6 +303,26 @@ static int serve_file(int fd, const char *path, const char *root_dir,
         return 500;
     }
 
+    char *resolved = realpath(full, NULL);
+    if (!resolved) {
+        int code = (errno == EACCES) ? 403 : 404;
+        send_error(fd, code, code == 403 ? "Access denied" : "File not found");
+        return code;
+    }
+    if (strncmp(resolved, root_dir, strlen(root_dir)) != 0) {
+        free(resolved);
+        send_error(fd, 403, "Access denied");
+        return 403;
+    }
+    size_t rlen = strlen(resolved);
+    if (rlen >= sizeof(full)) {
+        free(resolved);
+        send_error(fd, 500, "Path too long");
+        return 500;
+    }
+    memcpy(full, resolved, rlen + 1);
+    free(resolved);
+
     struct stat st;
     if (stat(full, &st) < 0) {
         int code = (errno == EACCES) ? 403 : 404;
@@ -321,6 +352,24 @@ static int serve_file(int fd, const char *path, const char *root_dir,
 
         if (stat(index_path, &st) == 0 && S_ISREG(st.st_mode)) {
             memcpy(full, index_path, sizeof(full));
+            char *res2 = realpath(full, NULL);
+            if (!res2) {
+                send_error(fd, 403, "Access denied");
+                return 403;
+            }
+            if (strncmp(res2, root_dir, strlen(root_dir)) != 0) {
+                free(res2);
+                send_error(fd, 403, "Access denied");
+                return 403;
+            }
+            size_t rl2 = strlen(res2);
+            if (rl2 >= sizeof(full)) {
+                free(res2);
+                send_error(fd, 500, "Path too long");
+                return 500;
+            }
+            memcpy(full, res2, rl2 + 1);
+            free(res2);
         } else {
             send_error(fd, 403, "Directory listing not available");
             return 403;
@@ -481,7 +530,7 @@ static void handle_client(int fd, const char *root_dir, const char *ip_str)
 
     char *decoded = url_decode(path);
     if (!decoded) {
-        send_error(fd, 500, "URL decode failed");
+        send_error(fd, 400, "Invalid URL encoding");
         log_request(ip_str, method, path, 500, 0);
         close(fd);
         return;
@@ -526,6 +575,8 @@ static void *worker_thread(void *arg)
     handle_client(job->fd, job->root_dir, job->ip_str);
     conn_dec();
     free(job);
+    if (thread_limit_enabled)
+        sem_post(&thread_sem);
     return NULL;
 }
 
@@ -599,6 +650,21 @@ int server_start(server_config *config)
         return 1;
     }
 
+    /* Resolve root directory to absolute path and check it exists */
+    char *resolved_root = realpath(config->root_dir, NULL);
+    if (!resolved_root) {
+        fprintf(stderr, "error: root directory '%s' does not exist\n", config->root_dir);
+        close(server_fd);
+        return 1;
+    }
+
+    config->root_dir = resolved_root;
+
+    if (config->max_threads > 0) {
+        sem_init(&thread_sem, 0, (unsigned int)config->max_threads);
+        thread_limit_enabled = 1;
+    }
+
     printf("OHTTPd/1.0 — listening on http://0.0.0.0:%d/\n", config->port);
     printf("Root directory: %s\n", config->root_dir);
     printf("Max threads: %d\n", config->max_threads);
@@ -641,11 +707,16 @@ int server_start(server_config *config)
         tv.tv_usec = 0;
         setsockopt(client_fd, SOL_SOCKET, SO_RCVTIMEO, &tv, sizeof(tv));
 
+        if (thread_limit_enabled)
+            sem_wait(&thread_sem);
+
         conn_inc();
 
         client_job *job = malloc(sizeof(client_job));
         if (!job) {
             conn_dec();
+            if (thread_limit_enabled)
+                sem_post(&thread_sem);
             close(client_fd);
             continue;
         }
@@ -667,6 +738,8 @@ int server_start(server_config *config)
             perror("pthread_create");
             handle_client(client_fd, config->root_dir, job->ip_str);
             conn_dec();
+            if (thread_limit_enabled)
+                sem_post(&thread_sem);
             free(job);
         } else {
             pthread_detach(thread);
