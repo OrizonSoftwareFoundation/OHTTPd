@@ -3,6 +3,9 @@
 
 #define _POSIX_C_SOURCE 200809L
 
+#include <stdatomic.h>
+#include <stdint.h>
+
 #include <arpa/inet.h>
 #include <errno.h>
 #include <fcntl.h>
@@ -20,8 +23,80 @@
 
 #define BUFFER_SIZE 8192
 #define REQUEST_MAX 4096
+#define RATE_TABLE_SIZE 256
+#define RATE_WINDOW 60
 
 static volatile int running = 1;
+
+/* --- rate limiter --- */
+
+typedef struct {
+    uint32_t ip;
+    time_t window_start;
+    unsigned int count;
+} rate_entry;
+
+static rate_entry rate_table[RATE_TABLE_SIZE];
+static pthread_mutex_t rate_lock = PTHREAD_MUTEX_INITIALIZER;
+
+static uint32_t ip4_from_addr(const struct sockaddr_storage *addr)
+{
+    if (addr->ss_family == AF_INET) {
+        const struct sockaddr_in *sin = (const struct sockaddr_in *)addr;
+        return (uint32_t)ntohl(sin->sin_addr.s_addr);
+    }
+    if (addr->ss_family == AF_INET6) {
+        const struct sockaddr_in6 *sin6 = (const struct sockaddr_in6 *)addr;
+        if (IN6_IS_ADDR_V4MAPPED(&sin6->sin6_addr))
+            return (uint32_t)(ntohl(sin6->sin6_addr.__in6_u.__u6_addr32[3]));
+    }
+    return 0;
+}
+
+static int rate_check(uint32_t ip, int limit)
+{
+    if (limit <= 0) return 1;
+
+    time_t now = time(NULL);
+    unsigned int slot = (ip ^ (ip >> 8)) % RATE_TABLE_SIZE;
+
+    pthread_mutex_lock(&rate_lock);
+
+    rate_entry *e = &rate_table[slot];
+    if (e->ip != ip || (now - e->window_start) > RATE_WINDOW) {
+        e->ip = ip;
+        e->window_start = now;
+        e->count = 1;
+        pthread_mutex_unlock(&rate_lock);
+        return 1;
+    }
+
+    e->count++;
+    int ok = e->count <= (unsigned int)limit;
+    pthread_mutex_unlock(&rate_lock);
+    return ok;
+}
+
+/* --- connection limit --- */
+
+static atomic_int active_connections = 0;
+
+static void conn_inc(void)
+{
+    atomic_fetch_add(&active_connections, 1);
+}
+
+static void conn_dec(void)
+{
+    atomic_fetch_sub(&active_connections, 1);
+}
+
+static int conn_try_accept(int max)
+{
+    if (max <= 0) return 1;
+    int cur = atomic_load(&active_connections);
+    return cur < max;
+}
 
 static void sigint_handler(int sig)
 {
@@ -304,6 +379,7 @@ static void *worker_thread(void *arg)
 {
     client_job *job = (client_job *)arg;
     handle_client(job->fd, job->root_dir);
+    conn_dec();
     free(job);
     return NULL;
 }
@@ -381,6 +457,10 @@ int server_start(server_config *config)
     printf("OHTTPd/1.0 — listening on http://0.0.0.0:%d/\n", config->port);
     printf("Root directory: %s\n", config->root_dir);
     printf("Max threads: %d\n", config->max_threads);
+    if (config->max_connections > 0)
+        printf("Max connections: %d\n", config->max_connections);
+    if (config->rate_limit > 0)
+        printf("Rate limit: %d/min per IP\n", config->rate_limit);
     printf("Press Ctrl+C to stop.\n");
 
     while (running) {
@@ -394,13 +474,27 @@ int server_start(server_config *config)
             continue;
         }
 
+        if (!conn_try_accept(config->max_connections)) {
+            close(client_fd);
+            continue;
+        }
+
+        uint32_t ip = ip4_from_addr(&client_addr);
+        if (!rate_check(ip, config->rate_limit)) {
+            close(client_fd);
+            continue;
+        }
+
         struct timeval tv;
         tv.tv_sec = 5;
         tv.tv_usec = 0;
         setsockopt(client_fd, SOL_SOCKET, SO_RCVTIMEO, &tv, sizeof(tv));
 
+        conn_inc();
+
         client_job *job = malloc(sizeof(client_job));
         if (!job) {
+            conn_dec();
             close(client_fd);
             continue;
         }
@@ -412,6 +506,7 @@ int server_start(server_config *config)
         if (pthread_create(&thread, NULL, worker_thread, job) != 0) {
             perror("pthread_create");
             handle_client(client_fd, config->root_dir);
+            conn_dec();
             free(job);
         } else {
             pthread_detach(thread);
