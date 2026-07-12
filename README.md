@@ -77,23 +77,6 @@ sudo ./ohttpd -p 80 -u nobody -r /var/www/html
 
 Then open `http://localhost:8080/` in your browser.
 
-## Project structure
-
-```
-OHTTPd/
-├── Makefile        # Build system
-├── src/
-│   ├── main.c      # Entry point, CLI argument parsing
-│   ├── server.h    # Public API header
-│   ├── server.c    # Core server: sockets, HTTP, file serving, threading
-│   ├── mime.h      # MIME type declaration
-│   └── mime.c      # MIME type mapping table
-├── public/
-│   └── index.html  # Default landing page
-├── LICENSE         # EUPL v1.2
-└── README.md
-```
-
 ## License
 
 European Union Public Licence v. 1.2 - see [LICENSE](LICENSE).
