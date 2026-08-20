@@ -15,7 +15,7 @@ static void print_usage(const char *prog)
         "  -r, --root <dir>       Root directory for serving files\n"
         "                         (default: ./public)\n"
         "  -b, --backlog <num>    Connection backlog (default: 16)\n"
-        "  -t, --threads <num>    Max worker threads (default: 4)\n"
+        "  -t, --threads <num>    Max worker threads (default: 0=unlimited)\n"
         "  -u, --user <name>      Drop privileges to this user after bind\n"
         "  -c, --connlimit <num>  Max concurrent connections (default: 256, 0=unlim)\n"
         "  -l, --ratelimit <num>  Max connections/min per IP (default: 100, 0=unlim)\n"
@@ -29,7 +29,7 @@ int main(int argc, char *argv[])
     config.port = 8080;
     config.root_dir = "./public";
     config.backlog = 16;
-    config.max_threads = 4;
+    config.max_threads = 0;
     config.run_user = NULL;
     config.max_connections = 256;
     config.rate_limit = 600;
@@ -70,8 +70,8 @@ int main(int argc, char *argv[])
                 return 1;
             }
             config.max_threads = atoi(argv[++i]);
-            if (config.max_threads <= 0) {
-                fprintf(stderr, "error: threads must be positive\n");
+            if (config.max_threads < 0) {
+                fprintf(stderr, "error: threads must be >= 0\n");
                 return 1;
             }
         } else if (strcmp(argv[i], "-u") == 0 || strcmp(argv[i], "--user") == 0) {
